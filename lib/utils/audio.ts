@@ -19,7 +19,9 @@ export const blobToBase64 = (blob: Blob): Promise<string> =>
 /**
  * Requests both tab sharing and mic input, then properly mixes them using AudioContext
  */
-export const requestAudioStream = async (): Promise<{
+export const requestAudioStream = async (
+  onEnded?: () => void
+): Promise<{
   stream: MediaStream;
   cleanup: () => void;
 }> => {
@@ -40,8 +42,12 @@ export const requestAudioStream = async (): Promise<{
   const audioTracks = tabStream.getAudioTracks();
   const videoTracks = tabStream.getVideoTracks();
 
-  // Stop video tracks (we only need audio)
-  videoTracks.forEach((track) => track.stop());
+  // Handle "Stop sharing" from browser UI
+  if (videoTracks.length > 0) {
+    videoTracks[0].onended = () => {
+      if (onEnded) onEnded();
+    };
+  }
 
   // If tab has audio, mix both streams using AudioContext
   if (audioTracks.length > 0) {
@@ -71,4 +77,3 @@ export const requestAudioStream = async (): Promise<{
     cleanup: () => cleanupFns.forEach((fn) => fn()),
   };
 };
-
