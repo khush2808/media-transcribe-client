@@ -1,85 +1,18 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { io, Socket } from "socket.io-client";
-import { createMachine } from "xstate";
 import { useMachine } from "@xstate/react";
 import useSWR from "swr";
 import clsx from "clsx";
+import { recorderMachine } from "../lib/state/recorderMachine";
+import { useSocket } from "../lib/hooks/useSocket";
+import { useMediaRecorder } from "../lib/hooks/useMediaRecorder";
+import { API_BASE, statusBadgeMap } from "../lib/constants";
+import type { SessionStatus, SessionRecord } from "../lib/types";
 
-const API_BASE =
-  process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:4000";
 const fetcher = (url: string) => fetch(url).then((res) => res.json());
 
-const recorderMachine = createMachine({
-  id: "recorder",
-  initial: "idle",
-  states: {
-    idle: {
-      on: { START: "recording" },
-    },
-    recording: {
-      on: { PAUSE: "paused", STOP: "processing", ERROR: "error" },
-    },
-    paused: {
-      on: { RESUME: "recording", STOP: "processing", ERROR: "error" },
-    },
-    processing: {
-      on: { COMPLETE: "completed", ERROR: "error" },
-    },
-    completed: {
-      on: { RESET: "idle" },
-    },
-    error: {
-      on: { RESET: "idle" },
-    },
-  },
-});
-
-type SessionStatus =
-  | "RECORDING"
-  | "PAUSED"
-  | "PROCESSING"
-  | "COMPLETED"
-  | "FAILED";
-
-type TranscriptSegment = {
-  id: string;
-  chunkIndex: number;
-  text: string;
-  createdAt: string;
-};
-
-type SessionRecord = {
-  id: string;
-  title: string;
-  mode: string;
-  status: SessionStatus;
-  summaryStatus: "IDLE" | "RUNNING" | "READY" | "FAILED";
-  summary?: string | null;
-  createdAt: string;
-  updatedAt: string;
-  segments: TranscriptSegment[];
-};
-
-const MIME_TYPE = "audio/webm;codecs=opus";
-const CHUNK_DURATION = 6000; // 6 seconds keeps latency low while limiting payload size
-
-const statusBadgeMap: Record<SessionStatus, string> = {
-  RECORDING: "bg-emerald-100 text-emerald-700",
-  PAUSED: "bg-amber-100 text-amber-700",
-  PROCESSING: "bg-indigo-100 text-indigo-700",
-  COMPLETED: "bg-slate-100 text-slate-700",
-  FAILED: "bg-rose-100 text-rose-700",
-};
-
 export default function Home() {
-  const socketRef = useRef<Socket | null>(null);
-  const mediaRecorderRef = useRef<MediaRecorder | null>(null);
-  const cleanupRef = useRef<(() => void) | null>(null);
-  const chunkIndexRef = useRef(0);
-  const activeSessionIdRef = useRef<string | null>(null);
-
   const [state, send] = useMachine(recorderMachine);
   const [sessionTitle, setSessionTitle] = useState(
     () => `Session ${new Date().toLocaleDateString()}`
@@ -92,12 +25,60 @@ export default function Home() {
     "IDLE"
   );
 
+  const mediaRecorderRef = useRef<MediaRecorder | null>(null);
+  const cleanupRef = useRef<(() => void) | null>(null);
+  const chunkIndexRef = useRef(0);
+  const activeSessionIdRef = useRef<string | null>(null);
+
   const {
     data: sessions,
     mutate: mutateSessions,
     isLoading,
   } = useSWR<SessionRecord[]>(`${API_BASE}/sessions`, fetcher, {
     refreshInterval: 8000,
+  });
+
+  const socketRef = useSocket({
+    onStatusUpdate: (payload) => {
+      if (payload.sessionId === activeSessionIdRef.current) {
+        setServerStatus(payload.status);
+      }
+    },
+    onTranscriptUpdate: (payload) => {
+      if (payload.sessionId === activeSessionIdRef.current) {
+        setTranscript((prev) => [...prev, payload.text]);
+      }
+    },
+    onSummaryReady: (payload) => {
+      if (payload.sessionId === activeSessionIdRef.current) {
+        setSummary(payload.summary);
+        send({ type: "COMPLETE" });
+        setServerStatus("COMPLETED");
+      }
+    },
+    onSummaryFailed: (payload) => {
+      setBanner(`Summary failed: ${payload.error}`);
+      send({ type: "ERROR" });
+      setServerStatus("FAILED");
+    },
+    onSessionError: (payload) => {
+      setBanner(payload.error);
+      send({ type: "ERROR" });
+    },
+    onMutateSessions: mutateSessions,
+  });
+
+  const {
+    startRecording: startMediaRecording,
+    pauseRecording: pauseMediaRecording,
+    resumeRecording: resumeMediaRecording,
+    stopRecording: stopMediaRecording,
+    cleanupMedia,
+  } = useMediaRecorder({
+    mediaRecorder: mediaRecorderRef,
+    cleanup: cleanupRef,
+    chunkIndex: chunkIndexRef,
+    activeSessionId: activeSessionIdRef,
   });
 
   const resetState = useCallback(() => {
@@ -108,131 +89,6 @@ export default function Home() {
     setServerStatus("IDLE");
     send({ type: "RESET" });
   }, [send]);
-
-  const cleanupMedia = useCallback(() => {
-    cleanupRef.current?.();
-    cleanupRef.current = null;
-    mediaRecorderRef.current?.stream.getTracks().forEach((t) => t.stop());
-    mediaRecorderRef.current = null;
-  }, []);
-
-  useEffect(() => {
-    const socket = io(API_BASE, {
-      transports: ["websocket"],
-    });
-    socketRef.current = socket;
-
-    socket.on(
-      "session:status",
-      (payload: { sessionId: string; status: SessionStatus }) => {
-        if (payload.sessionId === activeSessionIdRef.current) {
-          setServerStatus(payload.status);
-        }
-      }
-    );
-
-    socket.on(
-      "transcript:update",
-      (payload: { sessionId: string; text: string }) => {
-        if (payload.sessionId === activeSessionIdRef.current) {
-          setTranscript((prev) => [...prev, payload.text]);
-        }
-        mutateSessions();
-      }
-    );
-
-    socket.on(
-      "summary:ready",
-      (payload: { sessionId: string; summary: string }) => {
-        if (payload.sessionId === activeSessionIdRef.current) {
-          setSummary(payload.summary);
-          send({ type: "COMPLETE" });
-          setServerStatus("COMPLETED");
-        }
-        mutateSessions();
-      }
-    );
-
-    socket.on("summary:failed", (payload: { error: string }) => {
-      setBanner(`Summary failed: ${payload.error}`);
-      send({ type: "ERROR" });
-      setServerStatus("FAILED");
-    });
-
-    socket.on("session:error", (payload: { error: string }) => {
-      setBanner(payload.error);
-      send({ type: "ERROR" });
-    });
-
-    return () => {
-      socket.disconnect();
-    };
-  }, [mutateSessions, send]);
-
-  const blobToBase64 = (blob: Blob) =>
-    new Promise<string>((resolve, reject) => {
-      const reader = new FileReader();
-      reader.onloadend = () => {
-        const result = reader.result;
-        if (typeof result === "string") {
-          resolve(result.split(",").pop() ?? "");
-        } else {
-          reject(new Error("Could not encode chunk"));
-        }
-      };
-      reader.onerror = reject;
-      reader.readAsDataURL(blob);
-    });
-
-  const requestStream = useCallback(async (): Promise<MediaStream> => {
-    // Request both tab sharing and mic input
-    const tabStream = await navigator.mediaDevices.getDisplayMedia({
-      video: true,
-      audio: true,
-    });
-    
-    const micStream = await navigator.mediaDevices.getUserMedia({
-      audio: true,
-    });
-
-    // Combine both audio tracks
-    const combinedStream = new MediaStream();
-    tabStream.getAudioTracks().forEach((track) => combinedStream.addTrack(track));
-    micStream.getAudioTracks().forEach((track) => combinedStream.addTrack(track));
-
-    cleanupRef.current = () => {
-      tabStream.getTracks().forEach((track) => track.stop());
-      micStream.getTracks().forEach((track) => track.stop());
-    };
-
-    return combinedStream;
-  }, []);
-
-  const initSession = (socket: Socket) =>
-    new Promise<string>((resolve, reject) => {
-      const timeout = setTimeout(() => {
-        reject(new Error("Timed out creating session"));
-      }, 6000);
-
-      const handleCreated = (payload: { sessionId: string }) => {
-        clearTimeout(timeout);
-        socket.off("session:error", handleError);
-        resolve(payload.sessionId);
-      };
-
-      const handleError = (payload: { error: string }) => {
-        clearTimeout(timeout);
-        socket.off("session:created", handleCreated);
-        reject(new Error(payload.error));
-      };
-
-      socket.once("session:created", handleCreated);
-      socket.once("session:error", handleError);
-      socket.emit("session:init", {
-        title: sessionTitle.trim() || `Session ${new Date().toLocaleString()}`,
-        mode: "tab",
-      });
-    });
 
   const startRecording = useCallback(async () => {
     if (state.matches("recording")) return;
@@ -246,35 +102,13 @@ export default function Home() {
       setBanner(null);
       setTranscript([]);
       setSummary(null);
-      chunkIndexRef.current = 0;
       send({ type: "START" });
       setServerStatus("RECORDING");
 
-      const stream = await requestStream();
-      const sessionId = await initSession(socket);
-      setActiveSessionId(sessionId);
-      activeSessionIdRef.current = sessionId;
-
-      const recorder = new MediaRecorder(stream, { mimeType: MIME_TYPE });
-      mediaRecorderRef.current = recorder;
-
-      recorder.ondataavailable = async (event: BlobEvent) => {
-        if (!event.data.size || !activeSessionIdRef.current) return;
-        const audioBase64 = await blobToBase64(event.data);
-        socket.emit("audio:chunk", {
-          sessionId: activeSessionIdRef.current,
-          chunkIndex: chunkIndexRef.current++,
-          mimeType: MIME_TYPE,
-          audioBase64,
-          durationMs: CHUNK_DURATION,
-        });
-      };
-
-      recorder.onstop = () => {
-        cleanupMedia();
-      };
-
-      recorder.start(CHUNK_DURATION);
+      await startMediaRecording(socket, sessionTitle, (sessionId) => {
+        setActiveSessionId(sessionId);
+        activeSessionIdRef.current = sessionId;
+      });
     } catch (error) {
       const message =
         error instanceof Error ? error.message : "Unable to start recording";
@@ -282,37 +116,32 @@ export default function Home() {
       cleanupMedia();
       send({ type: "ERROR" });
     }
-  }, [cleanupMedia, requestStream, send, state, sessionTitle]);
+  }, [
+    state,
+    socketRef,
+    startMediaRecording,
+    sessionTitle,
+    cleanupMedia,
+    send,
+  ]);
 
   const pauseRecording = useCallback(() => {
-    if (!mediaRecorderRef.current || !activeSessionIdRef.current) return;
-    mediaRecorderRef.current.pause();
-    socketRef.current?.emit("session:pause", {
-      sessionId: activeSessionIdRef.current,
-    });
+    pauseMediaRecording(socketRef.current);
     send({ type: "PAUSE" });
     setServerStatus("PAUSED");
-  }, [send]);
+  }, [pauseMediaRecording, socketRef, send]);
 
   const resumeRecording = useCallback(() => {
-    if (!mediaRecorderRef.current || !activeSessionIdRef.current) return;
-    mediaRecorderRef.current.resume();
-    socketRef.current?.emit("session:resume", {
-      sessionId: activeSessionIdRef.current,
-    });
+    resumeMediaRecording(socketRef.current);
     send({ type: "RESUME" });
     setServerStatus("RECORDING");
-  }, [send]);
+  }, [resumeMediaRecording, socketRef, send]);
 
   const stopRecording = useCallback(() => {
-    if (!mediaRecorderRef.current || !activeSessionIdRef.current) return;
-    mediaRecorderRef.current.stop();
-    socketRef.current?.emit("session:stop", {
-      sessionId: activeSessionIdRef.current,
-    });
+    stopMediaRecording(socketRef.current);
     send({ type: "STOP" });
     setServerStatus("PROCESSING");
-  }, [send]);
+  }, [stopMediaRecording, socketRef, send]);
 
   useEffect(() => {
     return () => {
@@ -320,7 +149,10 @@ export default function Home() {
     };
   }, [cleanupMedia]);
 
-  const actionableSessions = useMemo<SessionRecord[]>(() => sessions ?? [], [sessions]);
+  const actionableSessions = useMemo<SessionRecord[]>(
+    () => sessions ?? [],
+    [sessions]
+  );
 
   const statusLabel =
     serverStatus === "IDLE"
@@ -338,8 +170,8 @@ export default function Home() {
             Real-time meeting transcription
           </h1>
           <p className="text-slate-300">
-            Capture tab audio and mic input, stream to Gemini, and receive diarized
-            transcripts with automatic summaries for every session.
+            Capture tab audio and mic input, stream to Gemini, and receive
+            diarized transcripts with automatic summaries for every session.
           </p>
         </header>
 
