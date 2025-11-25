@@ -9,7 +9,6 @@ type SocketHandlers = {
   onSummaryReady: (payload: { sessionId: string; summary: string }) => void;
   onSummaryFailed: (payload: { error: string }) => void;
   onSessionError: (payload: { error: string }) => void;
-  onMutateSessions: () => void;
 };
 
 export const useSocket = (handlers: SocketHandlers) => {
@@ -32,11 +31,9 @@ export const useSocket = (handlers: SocketHandlers) => {
     });
     socket.on("transcript:update", (payload) => {
       handlersRef.current.onTranscriptUpdate(payload);
-      handlersRef.current.onMutateSessions();
     });
     socket.on("summary:ready", (payload) => {
       handlersRef.current.onSummaryReady(payload);
-      handlersRef.current.onMutateSessions();
     });
     socket.on("summary:failed", (payload) => {
       handlersRef.current.onSummaryFailed(payload);

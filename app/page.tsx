@@ -67,7 +67,9 @@ export default function Home() {
     mutate: mutateSessions,
     isLoading,
   } = useSWR<SessionRecord[]>(`${API_BASE}/sessions`, fetcher, {
-    refreshInterval: 8000,
+    refreshInterval: 0,
+    revalidateOnFocus: false,
+    revalidateOnReconnect: false,
   });
 
   // Scroll to bottom of transcript
@@ -102,7 +104,6 @@ export default function Home() {
       setBanner(payload.error);
       send({ type: "ERROR" });
     },
-    onMutateSessions: mutateSessions,
   });
 
   const {
