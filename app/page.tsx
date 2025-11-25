@@ -36,7 +36,6 @@ const recorderMachine = createMachine({
   },
 });
 
-type SessionMode = "tab" | "mic";
 type SessionStatus =
   | "RECORDING"
   | "PAUSED"
@@ -63,20 +62,6 @@ type SessionRecord = {
   segments: TranscriptSegment[];
 };
 
-const MODE_OPTIONS: Array<{ id: SessionMode; label: string; helper: string }> =
-  [
-    {
-      id: "tab",
-      label: "Meeting tab (system audio)",
-      helper: "Ideal for Google Meet / Zoom shared tabs",
-    },
-    {
-      id: "mic",
-      label: "Microphone",
-      helper: "Capture voice directly from the mic",
-    },
-  ];
-
 const MIME_TYPE = "audio/webm;codecs=opus";
 const CHUNK_DURATION = 6000; // 6 seconds keeps latency low while limiting payload size
 
@@ -96,7 +81,6 @@ export default function Home() {
   const activeSessionIdRef = useRef<string | null>(null);
 
   const [state, send] = useMachine(recorderMachine);
-  const [selectedMode, setSelectedMode] = useState<SessionMode>("tab");
   const [sessionTitle, setSessionTitle] = useState(
     () => `Session ${new Date().toLocaleDateString()}`
   );
@@ -201,31 +185,28 @@ export default function Home() {
     });
 
   const requestStream = useCallback(async (): Promise<MediaStream> => {
-    if (selectedMode === "tab") {
-      try {
-        const stream = await navigator.mediaDevices.getDisplayMedia({
-          video: true,
-          audio: true,
-        });
-        const audioTracks = stream.getAudioTracks();
-        if (audioTracks.length) {
-          cleanupRef.current = () =>
-            stream.getTracks().forEach((track) => track.stop());
-          return new MediaStream(audioTracks);
-        }
-        stream.getTracks().forEach((track) => track.stop());
-      } catch (error) {
-        console.warn("Tab capture failed, falling back to mic", error);
-      }
-    }
-
+    // Request both tab sharing and mic input
+    const tabStream = await navigator.mediaDevices.getDisplayMedia({
+      video: true,
+      audio: true,
+    });
+    
     const micStream = await navigator.mediaDevices.getUserMedia({
       audio: true,
     });
-    cleanupRef.current = () =>
+
+    // Combine both audio tracks
+    const combinedStream = new MediaStream();
+    tabStream.getAudioTracks().forEach((track) => combinedStream.addTrack(track));
+    micStream.getAudioTracks().forEach((track) => combinedStream.addTrack(track));
+
+    cleanupRef.current = () => {
+      tabStream.getTracks().forEach((track) => track.stop());
       micStream.getTracks().forEach((track) => track.stop());
-    return micStream;
-  }, [selectedMode]);
+    };
+
+    return combinedStream;
+  }, []);
 
   const initSession = (socket: Socket) =>
     new Promise<string>((resolve, reject) => {
@@ -249,7 +230,7 @@ export default function Home() {
       socket.once("session:error", handleError);
       socket.emit("session:init", {
         title: sessionTitle.trim() || `Session ${new Date().toLocaleString()}`,
-        mode: selectedMode,
+        mode: "tab",
       });
     });
 
@@ -301,7 +282,7 @@ export default function Home() {
       cleanupMedia();
       send({ type: "ERROR" });
     }
-  }, [cleanupMedia, requestStream, send, state, sessionTitle, selectedMode]);
+  }, [cleanupMedia, requestStream, send, state, sessionTitle]);
 
   const pauseRecording = useCallback(() => {
     if (!mediaRecorderRef.current || !activeSessionIdRef.current) return;
@@ -357,7 +338,7 @@ export default function Home() {
             Real-time meeting transcription
           </h1>
           <p className="text-slate-300">
-            Capture mic or tab audio, stream to Gemini, and receive diarized
+            Capture tab audio and mic input, stream to Gemini, and receive diarized
             transcripts with automatic summaries for every session.
           </p>
         </header>
@@ -382,27 +363,6 @@ export default function Home() {
                   onChange={(event) => setSessionTitle(event.target.value)}
                   placeholder="e.g. GTM Weekly Sync"
                 />
-              </div>
-
-              <div>
-                <p className="text-sm text-slate-400">Capture mode</p>
-                <div className="mt-2 grid gap-3 md:grid-cols-2">
-                  {MODE_OPTIONS.map((option) => (
-                    <button
-                      key={option.id}
-                      onClick={() => setSelectedMode(option.id)}
-                      className={clsx(
-                        "rounded-2xl border px-4 py-3 text-left transition",
-                        selectedMode === option.id
-                          ? "border-cyan-400 bg-cyan-500/10"
-                          : "border-slate-800 hover:border-slate-600"
-                      )}
-                    >
-                      <p className="font-medium">{option.label}</p>
-                      <p className="text-sm text-slate-400">{option.helper}</p>
-                    </button>
-                  ))}
-                </div>
               </div>
 
               <div className="rounded-2xl border border-slate-800 bg-slate-950/40 p-4">
